@@ -3,7 +3,8 @@ Fetches restaurant names and locations across an entire country from the
 OpenStreetMap Overpass API, saves to a database.csv file.
 
 This CSV file generated can be uploaded via supabase's web UI.
-As of April 24th 2026, this file has ~213k restaurants with names and lat/lon across the US.
+As of April 24th 2026, this file will have ~213k restaurants with names and lat/lon across the US.
+And about 200k city/town/village + state -> lat/lon mappings.
 
 Table schema on the supabase DB:
 ## An example of 
@@ -27,6 +28,34 @@ class OSMDownloader:
 
 	def __init__(self, overpass_url):
 		self.overpass_url = overpass_url
+
+	def attempt_with_retries(self, overpass_query: str, headers: dict):
+		"""
+			ping overpass API and handle rate limits or no response.
+			Exit with failed code if no reply after a while..
+		"""
+
+		response = requests.get(
+			self.overpass_url, params={'data': overpass_query}, headers=headers
+		)
+
+		## Retry logic because it kept erroring out.
+		if response.status_code == 429: # rate limits reached
+			print("rate limit reached, sleeping..")
+			sleep(10)
+		retry = 0
+		while (response.status_code in [204, 429]) and retry < 5:
+			sleep(10)
+			print("Got no response, retrying..")
+			response = requests.get(
+				self.overpass_url, params={'data': overpass_query}, headers=headers
+			)
+			retry += 1
+
+		if response.status_code in [204, 429] or response.status_code >= 400:
+			# should hopefully never happen..
+			raise Exception("Cannot ping OpenStreetMaps Overpass API after 5 retries..")
+		return response
 
 	def extractRestaurantsFromState(self, state_name: str, state_code: str) -> List[List[str]]:
 		"""
@@ -58,25 +87,7 @@ class OSMDownloader:
 			out center;
 		'''
 
-		response = requests.get(
-			self.overpass_url, params={'data': overpass_query}, headers=headers
-		)
-
-		## Retry logic because it kept erroring out.
-		if response.status_code == 429: # rate limits reached
-			print("rate limit reached, sleeping..")
-			sleep(10)
-		retry = 0
-		while (response.status_code in [204, 429]) and retry < 5:
-			print("Got no response, retrying for", state_code)
-			response = requests.get(
-				self.overpass_url, params={'data': overpass_query}, headers=headers
-			)
-			retry += 1
-			sleep(10)
-		if response.status_code in [204, 429] or response.status_code >= 400:
-			# should hopefully never happen..
-			exit(1)
+		response = self.attempt_with_retries(overpass_query, headers)
 
 		elements = response.json().get('elements',[])
 		restaurants = [["name", "location", "address", "metadata", "web_link"]]
@@ -100,7 +111,7 @@ class OSMDownloader:
 						addr += val+" "
 				row = [
 					elem["tags"]["name"],
-					f"POINT({lon} {lat})",
+					f"SRID=4326;POINT({lon} {lat})",
 					addr,
 					elem["tags"].get("cuisine",''),
 					web_link
@@ -155,14 +166,73 @@ class OSMDownloader:
 		print(usa_states)
 		return usa_states
 
+	def downloadCityList(self, state_info: dict):
+		"""
+			Downloading the entire list of cities/towns/villages/neighborhoods/suburbs
+			for the entire country.
+			Helps with geocoding and easy future lookup for lat/lon coordinates.
+		"""
+
+		headers = {
+			'Accept': 'application/json',
+			'Content-Type': 'application/json',
+			'User-Agent': 'osm_scraper.py/1.0 (https://github.com)',
+			'Referer': 'https://github.com'
+		}
+
+		## Go through each state, collect the cities / places / towns within that state
+		cities = [["name", "state", "location"]]
+		for state_name, state_code in state_info.items():
+
+			print("Querying city/town/villages for", state_name)
+			overpass_query = '''
+				[out:json][timeout:60];
+				area["ISO3166-2"="'''+state_code+'''"]->.searchArea;
+				(
+				nwr
+					["place"~"city|town|village|hamlet|isolated_dwelling"]
+					(area.searchArea);
+				nwr
+					["place"~"suburb|neighbourhood|quarter"]
+					(area.searchArea);
+				);
+				out center;
+			'''
+
+			response = self.attempt_with_retries(overpass_query, headers)
+			elements = response.json().get('elements',[])
+
+			correct, skipped = 0, 0
+			for elem in elements:
+				try:
+					lat, lon = None, None
+					if elem['type'] != 'node':
+						lat, lon = elem['center']['lat'], elem['center']['lon']
+					else:
+						lat, lon = elem['lat'], elem['lon']
+					name = elem['tags']['name']
+					if not lat or not lon or not name:
+						raise Exception("Cannot find all data")
+					cities.append([name, state_code.split("-")[1], f"SRID=4326;POINT({lon} {lat})"])
+					correct += 1
+				except Exception as e:
+					# print(e,"not found in",elem)
+					skipped += 1
+			print("Extracted so far:", len(cities) - 1)
+			print("Correct:", correct, "Skipped:", skipped)
+
+		with open("cities.csv", "w") as file:
+			writer = csv.writer(file)
+			writer.writerows(cities)
+
 	def combineCSVs(self, csv_files: List[str]):
 		"""
-			Combines all the csv files generated in the previous steps into one database.csv file
+			Combines all the csv files generated in the previous steps into one restaurants.csv file
 			This new file can be imported into supabase via the web UI.
 		"""
 
 		records = []
-		dest_file = "database.csv"
+		dest_file = "restaurants.csv"
 		z=1
 		for f in csv_files:
 			print("processing",f)
@@ -205,6 +275,8 @@ if __name__ == "__main__":
 	
 	csv_file_list = [target_dir+f for f in os.listdir(target_dir)]
 	osm_scraper.combineCSVs(csv_file_list)
+
+	osm_scraper.downloadCityList(states)
 
 
 """
