@@ -1,3 +1,2 @@
 osm/
-data_ingestion/restaurant_db/
-*database.csv
+*.csv

@@ -1,0 +1,27 @@
+:root {
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, Consolas, monospace;
+  --accent: #a855f7;
+  --accent-dim: #7c3aed;
+
+  font: 16px/1.5 var(--sans);
+  color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #2f3e3e;
+}
+
+#root {
+  width: 100%;
+  min-height: 100svh;
+}
