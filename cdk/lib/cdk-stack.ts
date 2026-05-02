@@ -6,51 +6,13 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3Deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as bedrock from "aws-cdk-lib/aws-bedrock";
+import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as path from "path";
+import * as ecr_assets from "aws-cdk-lib/aws-ecr-assets";
+import { RESTAURANT_SCHEMA } from "./mcp-schema";
 
 const BEDROCK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const BEDROCK_BASE_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0";
-
-// openapi schema from the bedrock agent web ui
-const RESTAURANT_FINDER_SCHEMA = `openapi: 3.0.0
-info:
-  title: Restaurant Finder API
-  version: 1.0.0
-  description: API for finding restaurants near a city
-paths:
-  /rpc/find_restaurants_near_city:
-    post:
-      operationId: findRestaurantsNearCity
-      summary: Find restaurants near a city
-      description: Finds restaurants near a given city and state in the USA, optionally filtered by cuisine type (could be something like ramen, noodles, thai, chinese, indian).
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-                - city_name
-                - city_state
-              properties:
-                city_name:
-                  type: string
-                  description: The name of the city
-                city_state:
-                  type: string
-                  description: The state abbreviation, e.g. NY
-                cuisine:
-                  type: string
-                  description: Optional cuisine type to filter by, e.g. ramen, pizza
-                limit_n:
-                  type: integer
-                  description: Maximum number of restaurants to return
-                  default: 20
-      responses:
-        "200":
-          description: A list of restaurants in and around the specified city`;
-
 
 export class CdkStack extends cdk.Stack {
   private cfnOutCloudFrontUrl: cdk.CfnOutput;
@@ -123,85 +85,81 @@ export class CdkStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
     });
 
-    // give bedrock access to invoke this lambda.
-    restaurantFinderLambda.addPermission("AllowBedrockInvoke", {
-      principal: new iam.ServicePrincipal("bedrock.amazonaws.com"),
-      sourceAccount: this.account,
-      sourceArn: `arn:aws:bedrock:${this.region}:${this.account}:agent/*`,
-    });
-
-    // iam role
-
-    const bedrockAgentRole = new iam.Role(this, "BedrockAgentRole", {
-      roleName: "AmazonBedrockExecutionRoleForAgents_RestaurantFinder",
-      assumedBy: new iam.ServicePrincipal("bedrock.amazonaws.com", {
-        conditions: {
-          StringEquals: { "aws:SourceAccount": this.account },
-          ArnLike: { "aws:SourceArn": `arn:aws:bedrock:${this.region}:${this.account}:agent/*` },
-        },
+    // set this restaurant lambda behind agentcore mcp:
+    const agentcore_gw = new agentcore.Gateway(this, 'RestaurantGateway', {
+      gatewayName: "restaurant-gateway",
+      protocolConfiguration: new agentcore.McpProtocolConfiguration({
+        instructions: "Use this gateway to connect to external MCP tools",
+        searchType: agentcore.McpGatewaySearchType.SEMANTIC,
+        supportedVersions: [
+          agentcore.MCPProtocolVersion.MCP_2025_03_26,
+          agentcore.MCPProtocolVersion.MCP_2025_06_18,
+        ],
       }),
-      inlinePolicies: {
-        InvokeFoundationModel: new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                "bedrock:InvokeModel",
-                "bedrock:InvokeModelWithResponseStream",
-              ],
-              resources: [
-                `arn:aws:bedrock:us-east-1::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
-                `arn:aws:bedrock:us-east-2::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
-                `arn:aws:bedrock:us-west-2::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
-                `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/${BEDROCK_MODEL_ID}`,
-              ],
-            }),
-          ],
-        }),
+      authorizerConfiguration: agentcore.GatewayAuthorizer.usingAwsIam(),
+    });
+
+    agentcore_gw.addLambdaTarget('RestaurantTool', {
+      gatewayTargetName: "restaurant-tool",
+      description: "Finds restaurants in a given city and state in the US.",
+      lambdaFunction: restaurantFinderLambda,
+      toolSchema: agentcore.ToolSchema.fromInline( RESTAURANT_SCHEMA ),
+    });
+
+    new cdk.CfnOutput(this, 'GatewayUrl', {
+      value: agentcore_gw.gatewayUrl!,
+      description: 'AgentCore MCP Gateway URL',
+    });
+
+    restaurantFinderLambda.addPermission("AgentCoreGatewayInvoke", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: agentcore_gw.gatewayArn,
+    })
+
+    // agentcore runtime...
+  
+    const agentRuntimeArtifact = agentcore.AgentRuntimeArtifact.fromAsset(
+      path.join(__dirname, "../strands_agent"),
+      {
+        platform: ecr_assets.Platform.LINUX_ARM64,
       },
+    );
+
+    const agentcoreRuntime = new agentcore.Runtime(this, 'RestaurantAgentRuntime', {
+      runtimeName: "restaurant_agent",
+      agentRuntimeArtifact,
+      environmentVariables: {
+        GATEWAY_URL: agentcore_gw.gatewayUrl!,
+      }
     });
 
+    agentcoreRuntime.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["bedrock-agentcore:InvokeGateway"],
+      resources: [agentcore_gw.gatewayArn],
 
-    // system prompt for the agent.. And model to use.
-    const bedrockAgent = new bedrock.CfnAgent(this, "RestaurantAgent", {
-      agentName: "RestaurantFinderAgent",
-      description: "Finds restaurants near a city using natural language queries.",
-      autoPrepare: true,
-      instruction:
-        "You are a restaurant finder assistant. Use the restaurant-finder-action lambda function to find restaurants near a city in the United States. " +
-        "Always ask for the city and state in the USA if not provided, with an optional preference for cuisine. " +
-        "Present results clearly with name, lat/lon and cuisine and web link if available.",
-      foundationModel: BEDROCK_MODEL_ID,
-      agentResourceRoleArn: bedrockAgentRole.roleArn,
-      idleSessionTtlInSeconds: 600,
-      actionGroups: [
-        {
-          actionGroupName: "RestaurantFinderActionGroup",
-          description: "Finds restaurants near a given city using a Supabase RPC call.",
-          actionGroupExecutor: {
-            lambda: restaurantFinderLambda.functionArn,
-          },
-          apiSchema: {
-            payload: RESTAURANT_FINDER_SCHEMA,
-          },
-        },
+    }));
+
+    agentcoreRuntime.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
       ],
+      resources: [
+        `arn:aws:bedrock:us-east-1::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
+        `arn:aws:bedrock:us-east-2::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
+        `arn:aws:bedrock:us-west-2::foundation-model/${BEDROCK_BASE_MODEL_ID}`,
+        `arn:aws:bedrock:us-east-1:${this.account}:inference-profile/${BEDROCK_MODEL_ID}`,
+      ],
+    }));
+
+    new cdk.CfnOutput(this, 'AgentRuntimeArn', {
+      value: agentcoreRuntime.agentRuntimeArn,
+      description: 'AgentCore Runtime ARN',
     });
 
-    // annoying pt 2 .. we use an agent alias and tag the "live" version to the latest deployed version.
-    const bedrockAgentAlias = new bedrock.CfnAgentAlias(this, "RestaurantAgentAlias", {
-      agentId: bedrockAgent.attrAgentId,
-      agentAliasName: "live"
-    });
 
-    new cdk.CfnOutput(this, "BedrockAgentId", {
-      value: bedrockAgent.attrAgentId,
-      description: "Bedrock Agent ID",
-    });
-
-    new cdk.CfnOutput(this, "BedrockAgentAliasId", {
-      value: bedrockAgentAlias.attrAgentAliasId,
-      description: "Bedrock Agent Alias ID",
-    });
   }
 }
