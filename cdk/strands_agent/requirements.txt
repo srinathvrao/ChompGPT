@@ -1,5 +1,4 @@
 strands-agents>=1.0.0
 strands-agents-tools>=0.2.0
 bedrock_agentcore
-boto3
-httpx
+mcp-proxy-for-aws>=1.1.0
