@@ -16,6 +16,8 @@ const BEDROCK_BASE_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0";
 
 export class CdkStack extends cdk.Stack {
   private cfnOutCloudFrontUrl: cdk.CfnOutput;
+  public agentCoreRuntime: agentcore.Runtime;
+  public cloudfrontDistribution: cloudfront.Distribution;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -160,6 +162,9 @@ export class CdkStack extends cdk.Stack {
       description: 'AgentCore Runtime ARN',
     });
 
+
+    this.agentCoreRuntime = agentcoreRuntime;
+    this.cloudfrontDistribution = distribution;
 
   }
 }
