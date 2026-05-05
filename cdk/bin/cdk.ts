@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib/core';
 import { CdkStack } from '../lib/cdk-stack';
+import { ChatServicesStack } from '../lib/chat-stack';
 
+const env = { region: 'us-east-1' };
 const app = new cdk.App();
 const bedrockCDKStack = new CdkStack(app, 'RestaurantCDKStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
@@ -14,7 +16,13 @@ const bedrockCDKStack = new CdkStack(app, 'RestaurantCDKStack', {
 
   /* Uncomment the next line if you know exactly what Account and Region you
    * want to deploy the stack to. */
-  // env: { account: '123456789012', region: 'us-east-1' },
+  env: env,
 
   /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
+});
+
+const chatCDKStack = new ChatServicesStack(app, 'RestaurantChatStack', {
+  env: env,
+  agentCoreRuntime: bedrockCDKStack.agentCoreRuntime,
+  cloudfrontDistribution: bedrockCDKStack.cloudfrontDistribution,
 });
