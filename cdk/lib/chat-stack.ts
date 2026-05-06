@@ -2,7 +2,6 @@ import * as cdk from 'aws-cdk-lib/core';
 import { Construct } from 'constructs';
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as path from "path";
-import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
@@ -27,7 +26,6 @@ import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 
 interface ChatStackProps extends cdk.StackProps {
   agentCoreRuntime: agentcore.Runtime;
-  cloudfrontDistribution: cloudfront.Distribution;
 }
 
 // separate because my one stack was getting too messy..
@@ -37,10 +35,12 @@ interface ChatStackProps extends cdk.StackProps {
 
 export class ChatServicesStack extends cdk.Stack {
 
+  public chatAPI: apigateway.RestApi;
+
   constructor(scope: Construct, id: string, props: ChatStackProps) {
     super(scope, id, props);
 
-    const { agentCoreRuntime, cloudfrontDistribution } = props;
+    const { agentCoreRuntime } = props;
  
     // set up virtual private cloud and a private namespace.
     const vpc = new ec2.Vpc(this, "RestaurantFargateVpc", {
@@ -240,7 +240,9 @@ export class ChatServicesStack extends cdk.Stack {
       },
     });
 
-    const rootMethod = chatAPI.root.addMethod("ANY", vpcIntegration);
+    const rootMethod = chatAPI.root.addMethod("ANY", vpcIntegration, {
+      authorizationType: apigateway.AuthorizationType.IAM,
+    });
     const cfnRootMethod = rootMethod.node.defaultChild as apigateway.CfnMethod;
     cfnRootMethod.addOverride('Properties.Integration.ResponseTransferMode', 'STREAM');
 
@@ -248,6 +250,8 @@ export class ChatServicesStack extends cdk.Stack {
       value: chatAPI.url,
       description: "API Gateway endpoint URL",
     });
+
+    this.chatAPI = chatAPI;
 
     // Have to set up this api gateway for Cognito identity pools
     // TODO: read up on that..
