@@ -1,5 +1,7 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import './App.css'
+import { useConfig } from './config'
+import { createApiClient } from './aws'
 
 interface Message {
   id: number
@@ -12,8 +14,6 @@ interface Session {
   messages: Message[]
 }
 
-const API_URL = 'http://localhost:12345/chat'
-// change this to the API gateway chat endpoint. cloudfront deployment?
 const COOKIE_KEY = 'rf_sessions'
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 
@@ -34,6 +34,8 @@ function sessionLabel(session: Session): string {
 }
 
 function App() {
+  const config = useConfig()
+  const api = useMemo(() => createApiClient(config), [config])
   const [sessions, setSessions] = useState<Session[]>(() =>
     readSessionIds().map(id => ({ id, messages: [] }))
   )
@@ -113,7 +115,7 @@ function App() {
     setLoading(true)
 
     try {
-      const res = await fetch(API_URL, {
+      const res = await api.fetch('', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text, sessionId }),
