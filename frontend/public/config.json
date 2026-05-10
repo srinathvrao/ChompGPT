@@ -1,5 +1,4 @@
 {
   "region": "us-east-1",
-  "identityPoolId": "us-east-1:00000000-0000-0000-0000-000000000000",
-  "apiUrl": "http://localhost:12345/"
+  "albUrl": "url here"
 }

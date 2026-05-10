@@ -5,7 +5,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as path from "path";
 import * as ecr_assets from "aws-cdk-lib/aws-ecr-assets";
-import { RESTAURANT_SCHEMA } from "./mcp-schema";
+import { GEOCODER_SCHEMA, RESTAURANT_BY_LATLON_SCHEMA, RESTAURANT_BY_ADDRESS_SCHEMA } from "./mcp-schema";
 
 const BEDROCK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const BEDROCK_BASE_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -17,14 +17,31 @@ export class CdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // backend- lambda that talks to supabase.
-
-    const restaurantFinderLambda = new lambda.Function(this, "RestaurantFinderLambda", {
-      functionName: "restaurant-finder-action",
+    // NYC geocoder lambda - local CSV lookup
+    const geocoderLambda = new lambda.Function(this, "GeocoderLambda", {
+      functionName: "nyc-geocoder",
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.lambda_handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/restaurant_finder")),
-      timeout: cdk.Duration.seconds(30),
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/geocoder")),
+      timeout: cdk.Duration.seconds(5),
+    });
+
+    // NYC latlon finder lambda - supabase distance query
+    const nyclatlonLambda = new lambda.Function(this, "NYCLatLonLambda", {
+      functionName: "nyc-lat-lon-finder",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.lambda_handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/nyc_latlon_finder")),
+      timeout: cdk.Duration.seconds(12),
+    });
+
+    // NYC address finder lambda - supabase address matching
+    const nycaddrLambda = new lambda.Function(this, "NYCAddrLambda", {
+      functionName: "nyc-addr-finder",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.lambda_handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/nyc_addr_finder")),
+      timeout: cdk.Duration.seconds(12),
     });
 
     // set this restaurant lambda behind agentcore mcp:
@@ -41,23 +58,52 @@ export class CdkStack extends cdk.Stack {
       authorizerConfiguration: agentcore.GatewayAuthorizer.usingAwsIam(),
     });
 
-    agentcore_gw.addLambdaTarget('RestaurantTool', {
-      gatewayTargetName: "restaurant-tool",
-      description: "Finds restaurants in a given city and state in the US.",
-      lambdaFunction: restaurantFinderLambda,
-      toolSchema: agentcore.ToolSchema.fromInline( RESTAURANT_SCHEMA ),
+    agentcore_gw.addLambdaTarget('GeocoderTool', {
+      gatewayTargetName: "geocoder-tool",
+      description:
+        "Geocodes a NYC place name, address, neighborhood, or landmark to lat/lon. Skip when coordinates are already known.",
+      lambdaFunction: geocoderLambda,
+      toolSchema: agentcore.ToolSchema.fromInline(GEOCODER_SCHEMA),
     });
 
+    agentcore_gw.addLambdaTarget('NYCLatLonTool', {
+      gatewayTargetName: "nyc-lat-lon-tool",
+      description:
+        "Finds NYC restaurants near a lat/lon, sorted by distance. For any 'near X' or 'near me' query. Supports cuisine and price filters.",
+      lambdaFunction: nyclatlonLambda,
+      toolSchema: agentcore.ToolSchema.fromInline(RESTAURANT_BY_LATLON_SCHEMA),
+    });
+
+    agentcore_gw.addLambdaTarget('NYCAddressTool', {
+      gatewayTargetName: "nyc-address-tool",
+      description:
+        "Looks up NYC restaurants by address field match. Use for restaurants AT a specific address, or as a geocoder fallback.",
+      lambdaFunction: nycaddrLambda,
+      toolSchema: agentcore.ToolSchema.fromInline(RESTAURANT_BY_ADDRESS_SCHEMA),
+    });
+  
     new cdk.CfnOutput(this, 'GatewayUrl', {
       value: agentcore_gw.gatewayUrl!,
       description: 'AgentCore MCP Gateway URL',
     });
 
-    restaurantFinderLambda.addPermission("AgentCoreGatewayInvoke", {
+    geocoderLambda.addPermission("AgentCoreGatewayInvokeGeocoder", {
       principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
       action: "lambda:InvokeFunction",
       sourceArn: agentcore_gw.gatewayArn,
-    })
+    });
+
+    nyclatlonLambda.addPermission("AgentCoreGatewayInvokeNYCLatLon", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: agentcore_gw.gatewayArn,
+    });
+
+    nycaddrLambda.addPermission("AgentCoreGatewayInvokeNYCAddr", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: agentcore_gw.gatewayArn,
+    });
 
     // agentcore runtime...
   
@@ -73,6 +119,10 @@ export class CdkStack extends cdk.Stack {
       agentRuntimeArtifact,
       environmentVariables: {
         GATEWAY_URL: agentcore_gw.gatewayUrl!,
+      },
+      lifecycleConfiguration: {
+        idleRuntimeSessionTimeout: cdk.Duration.minutes(2),
+        maxLifetime: cdk.Duration.hours(8),
       }
     });
 

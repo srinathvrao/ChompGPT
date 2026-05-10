@@ -4,7 +4,7 @@ import { CdkStack } from '../lib/cdk-stack';
 import { ChatServicesStack } from '../lib/chat-stack';
 import { FrontendStack } from '../lib/frontend-stack';
 
-const env = { region: 'us-east-1' };
+const env = { account: '', region: 'us-east-1' };
 const app = new cdk.App();
 const bedrockCDKStack = new CdkStack(app, 'RestaurantAgentCDKStack', {
   env: env,
@@ -15,7 +15,7 @@ const chatCDKStack = new ChatServicesStack(app, 'RestaurantChatStack', {
   agentCoreRuntime: bedrockCDKStack.agentCoreRuntime,
 });
 
-const frontendCDKStack = new FrontendStack(app, 'ChompFrontendStack', {
-  env: env,
-  chatAPI: chatCDKStack.chatAPI,
-})
+new FrontendStack(app, 'ChompFrontendStack', {
+  env,
+  albDnsName: chatCDKStack.albDnsName,
+});
