@@ -5,7 +5,6 @@ import * as path from "path";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
-import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -15,12 +14,11 @@ import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 // cringe: api gateway -> lambda -> ...
 // based: api gateway -> load balancer VPC link ->  ECS Fargate containers -> ....
 //        Fargate can add more containers based on number of user connections.
-//        VPC ($7 per month) + Fargate ($10 per month) for 1 container
+//        VPC ($7 per month) + Fargate ($10 per month) for 1 container + Load balancer ($16/month)
+//        extra cost for scalable setup: +$33/month
 
 // fargate: pay for one lightweight container that's constantly running. always warm container.
 // lambda: pay for used execution time, cost goes crazy high. cold starting lambda is hella slow.
-// load balancer is required for response streaming REST APIs from VPC. (+$16 a month)
-// +$33/month if I use fargate but handles super high traffic.
 
 // could do the same for my MCP's lambda functions.. more work for future me.
 
@@ -35,7 +33,7 @@ interface ChatStackProps extends cdk.StackProps {
 
 export class ChatServicesStack extends cdk.Stack {
 
-  public chatAPI: apigateway.RestApi;
+  public readonly albDnsName: string;
 
   constructor(scope: Construct, id: string, props: ChatStackProps) {
     super(scope, id, props);
@@ -111,23 +109,34 @@ export class ChatServicesStack extends cdk.Stack {
     })
 
     // load balancer setup
-    const publicSubnets = vpc.selectSubnets({ 
-      subnetType: ec2.SubnetType.PUBLIC, 
+    const publicSubnets = vpc.selectSubnets({
+      subnetType: ec2.SubnetType.PUBLIC,
     });
 
-    const nlb = new elbv2.NetworkLoadBalancer(this, "NLB", {
+    const albSecGrp = new ec2.SecurityGroup(this, "ALBSecurityGroup", {
       vpc,
-      internetFacing: false,
-      vpcSubnets: publicSubnets,
-    })
-    const cfnNlb = nlb.node.defaultChild as elbv2.CfnLoadBalancer;
-    cfnNlb.securityGroups = [];
+      description: "ALB security group",
+      allowAllOutbound: true,
+    });
+    albSecGrp.addIngressRule(
+      ec2.Peer.prefixList('pl-3b927c52'), // us-east-1 aws cloudfront origins only
+      ec2.Port.tcp(80),
+      "Allow inbound :80 from CloudFront IPs only",
+    );
 
-    const targetGroup = new elbv2.NetworkTargetGroup(this, "TargetGroup", {
+    const alb = new elbv2.ApplicationLoadBalancer(this, "ALB", {
+      vpc,
+      internetFacing: true,
+      vpcSubnets: publicSubnets,
+      securityGroup: albSecGrp,
+    });
+
+    const targetGroup = new elbv2.ApplicationTargetGroup(this, "TargetGroup", {
       vpc,
       port: 3000,
-      protocol: elbv2.Protocol.TCP,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       targetType: elbv2.TargetType.IP,
+      loadBalancingAlgorithmType: elbv2.TargetGroupLoadBalancingAlgorithmType.LEAST_OUTSTANDING_REQUESTS,
       healthCheck: {
         enabled: true,
         protocol: elbv2.Protocol.HTTP,
@@ -140,16 +149,11 @@ export class ChatServicesStack extends cdk.Stack {
       }
     });
 
-    nlb.addListener("Listener", {
-      port: 3000,
-      protocol: elbv2.Protocol.TCP,
+    alb.addListener("Listener", {
+      port: 80,
+      protocol: elbv2.ApplicationProtocol.HTTP,
       defaultTargetGroups: [targetGroup],
-    })
-
-    const vpcLink = new apigateway.VpcLink(this, "VPCLink", {
-      vpcLinkName: "RestaurantVPCLink",
-      targets: [nlb],
-    })
+    });
 
     const chatServiceSecGrp = new ec2.SecurityGroup(this, "chatServiceSecurityGroup", {
       vpc: vpc,
@@ -157,11 +161,10 @@ export class ChatServicesStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // allow inbound requests from vpc to to chatService
     chatServiceSecGrp.addIngressRule(
-      ec2.Peer.ipv4(vpc.vpcCidrBlock),
+      albSecGrp,
       ec2.Port.tcp(3000),
-      'Allow inbound port :3000 on container',
+      "Allow inbound :3000 from ALB",
     );
 
     const chatService = new ecs.FargateService(this, "chatService", {
@@ -183,77 +186,19 @@ export class ChatServicesStack extends cdk.Stack {
       assignPublicIp: true,
     });
 
-    chatService.attachToNetworkTargetGroup(targetGroup);
+    chatService.attachToApplicationTargetGroup(targetGroup);
 
-    // fargate autoscaling:
-    const scaling = chatService.autoScaleTaskCount({
-      minCapacity: 1,
-      maxCapacity: 6,
-    });
+    // fargate autoscaling, allows 30 * 500 = 15,000 concurrent users.
+    chatService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 30 })
+      .scaleOnRequestCount("RequestCountScaling", {
+        requestsPerTarget: 500,
+        targetGroup,
+        scaleInCooldown: cdk.Duration.minutes(5),
+        scaleOutCooldown: cdk.Duration.minutes(1),
+      });
 
-    scaling.scaleOnMetric("ConnectionCountScaling", {
-      metric: new cloudwatch.Metric({
-        namespace: 'AWS/NetworkELB',
-        metricName: 'ActiveFlowCount',
-        dimensionsMap: {
-          LoadBalancer: nlb.loadBalancerFullName,
-        },
-        statistic: 'Sum',
-        period: cdk.Duration.minutes(1),
-      }),
-      scalingSteps: [
-        { upper: 400, change: 1 },
-        { lower: 400, upper: 800, change: 2 },
-        { lower: 800, upper: 1200, change: 3 },
-        { lower: 1200, upper: 1600, change: 4 },
-        { lower: 1600, change: 6 },
-      ],
-      adjustmentType: appscaling.AdjustmentType.EXACT_CAPACITY,
-      cooldown: cdk.Duration.minutes(2),
-    });
-
-    // allow chatService to reach out to agentcoreRuntime.
     agentCoreRuntime.grantInvokeRuntimeForUser(fargateTaskDefinition.taskRole);
 
-    const vpc_service = chatService.cloudMapService;
-    if (!vpc_service) {
-      throw new Error("Cloud Map service was not created - check cloudMapOptions");
-    }
-
-    // apigatewayv2 does not support response transfer mode: STREAMING. only collects and sends.
-    // gotta go back to apigatewayv1..
-
-    const vpcIntegration = new apigateway.Integration({
-      type: apigateway.IntegrationType.HTTP_PROXY,
-      integrationHttpMethod: "ANY",
-      uri: `http://${nlb.loadBalancerDnsName}:3000/`,
-      options: {
-        connectionType: apigateway.ConnectionType.VPC_LINK,
-        vpcLink: vpcLink,
-      },
-    });
-
-    const chatAPI = new apigateway.RestApi(this, "chatApi", {
-      endpointTypes: [apigateway.EndpointType.REGIONAL],
-      deployOptions: {
-        stageName: 'prod',
-      },
-    });
-
-    const rootMethod = chatAPI.root.addMethod("ANY", vpcIntegration, {
-      authorizationType: apigateway.AuthorizationType.IAM,
-    });
-    const cfnRootMethod = rootMethod.node.defaultChild as apigateway.CfnMethod;
-    cfnRootMethod.addOverride('Properties.Integration.ResponseTransferMode', 'STREAM');
-
-    new cdk.CfnOutput(this, "APIGatewayendpoint", {
-      value: chatAPI.url,
-      description: "API Gateway endpoint URL",
-    });
-
-    this.chatAPI = chatAPI;
-
-    // Have to set up this api gateway for Cognito identity pools
-    // TODO: read up on that..
+    this.albDnsName = alb.loadBalancerDnsName;
   }
 }

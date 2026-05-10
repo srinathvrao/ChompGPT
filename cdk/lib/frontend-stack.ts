@@ -4,67 +4,32 @@ import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as cloudfrontOrigins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3Deploy from "aws-cdk-lib/aws-s3-deployment";
-import * as iam from "aws-cdk-lib/aws-iam";
 import * as path from "path";
-import * as apigateway from "aws-cdk-lib/aws-apigateway";
-import * as cognito from "aws-cdk-lib/aws-cognito";
 
 interface FrontendStackProps extends cdk.StackProps {
-  chatAPI: apigateway.RestApi;
-};
+  albDnsName: string;
+}
 
 export class FrontendStack extends cdk.Stack {
+
+  public readonly distributionUrl: string;
 
   constructor(scope: Construct, id: string, props: FrontendStackProps) {
     super(scope, id, props);
 
-    const { chatAPI } = props;
-    // frontend.. serve s3 bucket with cloudfront.
-
-    const cognitoPool = new cognito.CfnIdentityPool(this, "RestaurantIdentityPool", {
-        identityPoolName: "restaurant-identity-pool",
-        allowUnauthenticatedIdentities: true,
-    });
-    
-    // all unauthenticated guests use this role
-    const unauthRole = new iam.Role(this, "CognitoUnauthRole", {
-        assumedBy: new iam.FederatedPrincipal(
-            "cognito-identity.amazonaws.com",
-            {
-                StringEquals: {
-                    "cognito-identity.amazonaws.com:aud": cognitoPool.ref,
-                },
-                "ForAnyValue:StringLike": {
-                    "cognito-identity.amazonaws.com:amr": "unauthenticated",
-                },
-            },
-            "sts:AssumeRoleWithWebIdentity",
-        )
-    })
-
-    unauthRole.addToPolicy(new iam.PolicyStatement({
-        actions: ['execute-api:Invoke'],
-        resources: [chatAPI.arnForExecuteApi('*', '/*', 'prod')],
-    }));
-
-    new cognito.CfnIdentityPoolRoleAttachment(this, 'IdentityPoolRoleAttachment', {
-        identityPoolId: cognitoPool.ref,
-        roles: {
-            unauthenticated: unauthRole.roleArn,
-        },
-    });
-
-    // Expose the IDs the frontend needs
-    new cdk.CfnOutput(this, 'IdentityPoolId', { value: cognitoPool.ref });
-    new cdk.CfnOutput(this, 'AwsRegion', { value: this.region });
-
+    const { albDnsName } = props;
 
     const bucket = new s3.Bucket(this, "restaurantApp", {
-      bucketName:  'restaurantbucket-mcp-app',
+      bucketName: 'restaurantbucket-mcp-app',
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       publicReadAccess: false,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true
+      autoDeleteObjects: true,
+    });
+
+    const albOrigin = new cloudfrontOrigins.HttpOrigin(albDnsName, {
+      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+      httpPort: 80,
     });
 
     const distribution = new cloudfront.Distribution(this, "RestaurantDistribution", {
@@ -73,6 +38,16 @@ export class FrontendStack extends cdk.Stack {
         compress: true,
         origin: cloudfrontOrigins.S3BucketOrigin.withOriginAccessControl(bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      additionalBehaviors: {
+        '/chat': {
+          origin: albOrigin,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+          compress: false,
+        },
       },
       defaultRootObject: "index.html",
       errorResponses: [
@@ -98,13 +73,14 @@ export class FrontendStack extends cdk.Stack {
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2019,
     });
 
+    this.distributionUrl = `https://${distribution.distributionDomainName}`;
+
     new s3Deploy.BucketDeployment(this, 'restaurantDeployment', {
       sources: [
         s3Deploy.Source.asset(path.join(__dirname, '../../frontend/dist')),
         s3Deploy.Source.jsonData("config.json", {
-            region: this.region,
-            identityPoolId: cognitoPool.ref,
-            apiUrl: chatAPI.url,
+          region: this.region,
+          albUrl: `https://${distribution.distributionDomainName}/chat`,
         }),
       ],
       destinationBucket: bucket,
@@ -113,14 +89,8 @@ export class FrontendStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "CfnOutCloudFrontUrl", {
-      value: `https://${distribution.distributionDomainName}`,
-      description: "The CloudFront URL",
+      value: this.distributionUrl,
+      description: "CloudFront distribution URL",
     });
-
-    new cdk.CfnOutput(this, "CfnOutApiGWURL", {
-        value: chatAPI.url,
-        description: "API gateway URL",
-    })
-
   }
 };

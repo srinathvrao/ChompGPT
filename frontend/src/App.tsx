@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
+import ReactMarkdown from 'react-markdown'
 import './App.css'
 import { useConfig } from './config'
 import { createApiClient } from './aws'
@@ -11,23 +12,62 @@ interface Message {
 
 interface Session {
   id: string
+  title?: string
   messages: Message[]
 }
 
-const COOKIE_KEY = 'rf_sessions'
-const COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+const EMPTY_PROMPTS_NO_SESSIONS = [
+  'Stomach: empty. Options: endless.',
+  'Food o\'clock. obviously.',
+  'No thoughts, just food',
+  'The tacos aren\'t gonna find themselves',
+  'Okay but where are we going tho',
+]
 
-function readSessionIds(): string[] {
-  const match = document.cookie.match(/(?:^|;\s*)rf_sessions=([^;]*)/)
-  if (!match?.[1]) return []
-  return match[1].split(',').filter(Boolean)
+const EMPTY_PROMPTS_WITH_SESSIONS = [
+  'Back again?? so predictable (same)',
+  'AND NOW... WE FEAST!',
+  'New chat, New meal, New me',
+  'You vs hunger. Round 2. Fight.',
+  'Hunger is imminent- act fast!',
+]
+
+const ALL_SUGGESTIONS = [
+  'BEST PIZZA WHERE',
+  'Cheap eats in Brooklyn',
+  'Kevin\'s famous chili?',
+  'Open late night',
+  'Best sushi in town',
+  'I. need. caffeine.',
+  'Brunch this weekend',
+  'Family friendly restaurants',
+  'Hidden gem restaurants',
+  'Tacos!!!!',
+  'Rooftop dining options',
+  'Date night ideas',
+  'Vegan options near me',
+]
+
+const STORAGE_KEY = 'rf_sessions'
+
+function readSessions(): Session[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    const stored: { id: string; title?: string }[] = raw ? JSON.parse(raw) : []
+    return stored.map(s => ({ id: s.id, title: s.title, messages: [] }))
+  } catch {
+    return []
+  }
 }
 
-function persistSessionIds(ids: string[]) {
-  document.cookie = `${COOKIE_KEY}=${ids.join(',')}; max-age=${COOKIE_MAX_AGE}; path=/; SameSite=Lax`
+function persistSessions(sessions: Session[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(
+    sessions.map(s => ({ id: s.id, title: s.title }))
+  ))
 }
 
 function sessionLabel(session: Session): string {
+  if (session.title) return session.title
   const first = session.messages.find(m => m.role === 'user')
   if (!first) return 'New chat'
   return first.text.length > 26 ? first.text.slice(0, 26) + '…' : first.text
@@ -36,9 +76,7 @@ function sessionLabel(session: Session): string {
 function App() {
   const config = useConfig()
   const api = useMemo(() => createApiClient(config), [config])
-  const [sessions, setSessions] = useState<Session[]>(() =>
-    readSessionIds().map(id => ({ id, messages: [] }))
-  )
+  const [sessions, setSessions] = useState<Session[]>(readSessions)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
@@ -47,6 +85,9 @@ function App() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const nextMsgId = useRef(0)
+  const suggestions = useMemo(() =>
+    [...ALL_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 4),
+  [])
 
   const activeSession = sessions.find(s => s.id === activeId) ?? null
 
@@ -74,7 +115,7 @@ function App() {
   function deleteSession(id: string) {
     setSessions(prev => {
       const next = prev.filter(s => s.id !== id)
-      persistSessionIds(next.map(s => s.id))
+      persistSessions(next)
       return next
     })
     if (activeId === id) setActiveId(null)
@@ -89,19 +130,20 @@ function App() {
     inputRef.current?.focus()
   }
 
-  async function sendMessage() {
-    const text = input.trim()
+  async function sendMessage(override?: string) {
+    const text = (override ?? input).trim()
     if (!text || loading) return
+    if (override) setSidebarOpen(false)
 
     let sessionId: string
+    const title = text.length > 26 ? text.slice(0, 26) + '…' : text
     if (activeId) {
       sessionId = activeId
     } else {
       sessionId = crypto.randomUUID()
-      const newSess: Session = { id: sessionId, messages: [] }
       setSessions(prev => {
-        const next = [...prev, newSess]
-        persistSessionIds(next.map(s => s.id))
+        const next = [...prev, { id: sessionId, title, messages: [] }]
+        persistSessions(next)
         return next
       })
       setActiveId(sessionId)
@@ -118,14 +160,55 @@ function App() {
       const res = await api.fetch('', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, sessionId }),
+        body: JSON.stringify({ prompt: text, sessionId }),
       })
-      const data = await res.json()
-      const reply = data.message ?? data.reply ?? data.response ?? data.text ?? JSON.stringify(data)
-      patchMessages(sessionId, msgs => [
-        ...msgs,
-        { id: nextMsgId.current++, role: 'assistant', text: reply },
-      ])
+
+      const reader = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let replyText = ''
+      let replyId: number | null = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const parsed = JSON.parse(line.slice(6).trim())
+            const text = parsed?.event?.contentBlockDelta?.delta?.text
+            if (text) {
+              replyText += text
+              if (replyId === null) {
+                replyId = nextMsgId.current++
+                setLoading(false)
+                patchMessages(sessionId, msgs => [
+                  ...msgs,
+                  { id: replyId!, role: 'assistant', text: replyText },
+                ])
+              } else {
+                patchMessages(sessionId, msgs =>
+                  msgs.map(m => m.id === replyId ? { ...m, text: replyText } : m)
+                )
+              }
+            }
+          } catch {
+            // skip non-JSON or non-event lines
+          }
+        }
+      }
+
+      if (replyId === null) {
+        patchMessages(sessionId, msgs => [
+          ...msgs,
+          { id: nextMsgId.current++, role: 'error', text: 'No response received' },
+        ])
+      }
     } catch (err) {
       patchMessages(sessionId, msgs => [
         ...msgs,
@@ -144,9 +227,10 @@ function App() {
     }
   }
 
-  const emptyPrompt = sessions.length === 0
-    ? 'Send a message to start your first chat'
-    : 'Select a chat or send a message to start a new one'
+  const emptyPrompt = useMemo(() => {
+    const pool = sessions.length === 0 ? EMPTY_PROMPTS_NO_SESSIONS : EMPTY_PROMPTS_WITH_SESSIONS
+    return pool[Math.floor(Math.random() * pool.length)]
+  }, [sessions.length === 0])
 
   return (
     <div className="page">
@@ -166,7 +250,10 @@ function App() {
         {/* Chat area — sidebar overlays this */}
         <div className="chat-area">
           <aside className={`sidebar-overlay${sidebarOpen ? ' sidebar-overlay--open' : ''}`}>
-            <button className="new-chat-btn" onClick={startNewChat}>+ New Chat</button>
+            <div className="sidebar-header">
+              <button className="sidebar-close-btn" aria-label="Close sidebar" onClick={() => setSidebarOpen(false)}>✕</button>
+              <button className="new-chat-btn" onClick={startNewChat}>+ New Chat</button>
+            </div>
             <ul className="session-list">
               {sessions.slice().reverse().map(s => (
                 <li
@@ -199,7 +286,14 @@ function App() {
 
           <div className="chat-shell">
             <header className="chat-header">
-              <span className="chat-title">Restaurant Finder</span>
+              <button
+                className="menu-toggle menu-toggle--header"
+                aria-label="Toggle sidebar"
+                onClick={() => setSidebarOpen(o => !o)}
+              >
+                <span /><span /><span />
+              </button>
+              <span className="chat-title">hungry.nyc 🗽</span>
             </header>
 
             <main className="message-list">
@@ -209,7 +303,11 @@ function App() {
                   ? <div className="empty-state">Send a message to get started</div>
                   : activeSession.messages.map(msg => (
                       <div key={msg.id} className={`bubble-row ${msg.role}`}>
-                        <div className={`bubble ${msg.role}`}>{msg.text}</div>
+                        <div className={`bubble ${msg.role}`}>
+                          {msg.role === 'assistant'
+                            ? <ReactMarkdown>{msg.text}</ReactMarkdown>
+                            : msg.text}
+                        </div>
                       </div>
                     ))
               }
@@ -218,6 +316,19 @@ function App() {
                   <div className="bubble assistant typing">
                     <span /><span /><span />
                   </div>
+                </div>
+              )}
+              {(!activeSession || activeSession.messages.length === 0) && (
+                <div className="prompt-suggestions">
+                  {suggestions.map(suggestion => (
+                    <button
+                      key={suggestion}
+                      className="suggestion-chip"
+                      onClick={() => sendMessage(suggestion)}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
                 </div>
               )}
               <div ref={bottomRef} />
@@ -236,7 +347,7 @@ function App() {
               />
               <button
                 className="send-btn"
-                onClick={sendMessage}
+                onClick={() => sendMessage()}
                 disabled={loading || !input.trim()}
                 aria-label="Send"
               >
