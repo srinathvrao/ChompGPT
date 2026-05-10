@@ -51,6 +51,13 @@ async def invoke(payload):
 	""" AgentCore invocation for each request """
 
 	user_prompt = payload.get("prompt", "")
+	history = payload.get("history", [])
+
+	# Convert stored history to Bedrock Converse message format for Strands
+	prior_messages = [
+		{"role": item["role"], "content": [{"text": item["content"]}]}
+		for item in history
+	]
 
 	restaurant_mcp_client = MCPClient(
 		lambda: aws_iam_streamablehttp_client(
@@ -62,10 +69,11 @@ async def invoke(payload):
 
 	with restaurant_mcp_client:
 		restaurant_tools = restaurant_mcp_client.list_tools_sync()
-		agent =  Agent(
+		agent = Agent(
 			model = MODEL_ID,
 			system_prompt=SYSTEM_PROMPT,
-			tools = [*restaurant_tools]
+			tools = [*restaurant_tools],
+			messages = prior_messages,
 		)
 
 		# response streaming...
