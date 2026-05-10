@@ -1,2 +1,3 @@
 osm/
 *.csv
+data_ingestion/

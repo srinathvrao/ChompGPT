@@ -10,6 +10,7 @@ import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 
 // cringe: api gateway -> lambda -> ...
 // based: api gateway -> load balancer VPC link ->  ECS Fargate containers -> ....
@@ -24,6 +25,7 @@ import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 
 interface ChatStackProps extends cdk.StackProps {
   agentCoreRuntime: agentcore.Runtime;
+  chatHistoryTable: dynamodb.Table;
 }
 
 // separate because my one stack was getting too messy..
@@ -38,7 +40,7 @@ export class ChatServicesStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ChatStackProps) {
     super(scope, id, props);
 
-    const { agentCoreRuntime } = props;
+    const { agentCoreRuntime, chatHistoryTable } = props;
  
     // set up virtual private cloud and a private namespace.
     const vpc = new ec2.Vpc(this, "RestaurantFargateVpc", {
@@ -97,6 +99,7 @@ export class ChatServicesStack extends cdk.Stack {
       environment: {
         AWS_REGION: this.region,
         AGENTCORE_RUNTIME_ARN: agentCoreRuntime.agentRuntimeArn,
+        CHAT_HISTORY_TABLE: chatHistoryTable.tableName,
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "restaurant-chat",
@@ -198,6 +201,7 @@ export class ChatServicesStack extends cdk.Stack {
       });
 
     agentCoreRuntime.grantInvokeRuntimeForUser(fargateTaskDefinition.taskRole);
+    chatHistoryTable.grantReadWriteData(fargateTaskDefinition.taskRole);
 
     this.albDnsName = alb.loadBalancerDnsName;
   }
