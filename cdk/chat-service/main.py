@@ -44,16 +44,19 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Security-Token"],
 )
 
-async def load_history(dynamo_client, session_id: str) -> list:
+async def load_history(dynamo_client, session_id: str, limit: int = 20) -> list:
     resp = await dynamo_client.query(
         TableName=TABLE_NAME,
         KeyConditionExpression="session_id = :sid",
         ExpressionAttributeValues={":sid": {"S": session_id}},
-        ScanIndexForward=True,
+        ScanIndexForward=False,
+        Limit=limit,
     )
+    items = resp.get("Items", [])
+    items.reverse()
     return [
         {"role": item["role"]["S"], "content": item["content"]["S"]}
-        for item in resp.get("Items", [])
+        for item in items
     ]
 
 async def save_message(dynamo_client, session_id: str, role: str, content: str):
