@@ -3,8 +3,7 @@ import type { ReactNode } from 'react'
 
 export interface AppConfig {
   region: string;
-  identityPoolId: string;
-  apiUrl: string;
+  albUrl: string;
 }
 
 let cached: AppConfig | null = null;
