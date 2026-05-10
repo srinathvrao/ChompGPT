@@ -10,11 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@aws-sdk/client-cognito-identity": "^3.1042.0",
-    "@aws-sdk/credential-provider-cognito-identity": "^3.972.31",
-    "aws4fetch": "^1.0.20",
+    "@aws-sdk/client-cognito-identity": "^3.972.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "react-markdown": "^10.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
