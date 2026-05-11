@@ -28,7 +28,10 @@ def lambda_handler(request, context):
 		return restaurants
 
 	except Exception as e:
-		return {}
+		print(f"ERROR in lambda_handler: {type(e).__name__}: {e}")
+		import traceback
+		traceback.print_exc()
+		raise
 
 if __name__ == "__main__":
     req = {

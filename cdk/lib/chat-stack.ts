@@ -191,10 +191,10 @@ export class ChatServicesStack extends cdk.Stack {
 
     chatService.attachToApplicationTargetGroup(targetGroup);
 
-    // fargate autoscaling, allows 30 * 500 = 15,000 concurrent users.
+    // fargate autoscaling, allows 30 * 300 = 9,000 concurrent users.
     chatService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 30 })
       .scaleOnRequestCount("RequestCountScaling", {
-        requestsPerTarget: 500,
+        requestsPerTarget: 300,
         targetGroup,
         scaleInCooldown: cdk.Duration.minutes(5),
         scaleOutCooldown: cdk.Duration.minutes(1),

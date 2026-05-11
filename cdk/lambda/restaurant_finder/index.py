@@ -12,7 +12,7 @@ def lambda_handler(request, context):
 
 		data = json.dumps(request).encode()
 		req = urllib.request.Request(
-			f"{SUPABASE_URL}/rest/v1/rpc/find_restaurants_near_city",
+			f"{SUPABASE_URL}/rest/v1/rpc/find_restaurants",
 			data=data,
 			headers={
 				"apikey": SUPABASE_KEY,
@@ -28,4 +28,16 @@ def lambda_handler(request, context):
 		return restaurants
 
 	except Exception as e:
-		return {}
+		print(f"ERROR in lambda_handler: {type(e).__name__}: {e}")
+		import traceback
+		traceback.print_exc()
+		raise
+
+
+if __name__ == "__main__":
+    req = {
+		"borotxt": "Manhattan",
+		"metatxt": "taco",
+		"limit_n": 25,
+	}
+    print(lambda_handler(req, None))

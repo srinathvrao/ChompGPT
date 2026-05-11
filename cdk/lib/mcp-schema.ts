@@ -2,29 +2,42 @@ import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 
 export const RESTAURANT_SCHEMA = [
   {
-    name: "restaurant_finder",
-    description: "Finds restaurants in a given city and state in the US. If the user didn't provide a state, figure it out yourself. The state is represented as a two-letter character.",
+    name: "nyc_restaurant_search",
+    description:
+      "Finds best-rated NYC restaurants for city-wide or borough-wide queries. " +
+      "Use for 'best of' queries and any query whose location is a whole borough " +
+      "('best pizza in NYC', 'top vegan in Brooklyn', 'restaurants in Queens'). " +
+      "For neighborhood-level or 'near X' queries, use the lat/lon finder instead.",
     inputSchema: {
       type: agentcore.SchemaDefinitionType.OBJECT,
       properties: {
-        city_name: {
+        metatxt: {
           type: agentcore.SchemaDefinitionType.STRING,
-          description: "The name of the city in the USA",
+          description:
+            "Optional cuisine or category keyword (e.g. 'pizza', 'vegan', 'tacos', 'ramen'). " +
+            "Case-insensitive substring match against the types field. Pass a single keyword.",
         },
-        city_state: {
+        borotxt: {
           type: agentcore.SchemaDefinitionType.STRING,
-          description: "The two letter name of the state in the USA",
+          description: "Optional NYC borough filter. Use the exact enum value.",
+          enum: ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"],
         },
-        cuisine: {
+        pricelvl: {
           type: agentcore.SchemaDefinitionType.STRING,
-          description: "The cuisine requested for (e.g. pizza, italian, japanese, chinese)",
+          description: "Optional price level filter.",
+          enum: [
+            "PRICE_LEVEL_INEXPENSIVE",
+            "PRICE_LEVEL_MODERATE",
+            "PRICE_LEVEL_EXPENSIVE",
+            "PRICE_LEVEL_VERY_EXPENSIVE",
+          ],
         },
         limit_n: {
           type: agentcore.SchemaDefinitionType.INTEGER,
-          description: "The upper bound on the number of restaurants returned by the tool",
+          description: "Max number of restaurants to return. Defaults to 50.",
         },
       },
-      required: ["city_name", "city_state"],
+      required: [],
     },
   },
 ];
