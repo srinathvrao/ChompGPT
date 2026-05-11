@@ -240,7 +240,32 @@
   font-size: 17px;
   font-weight: 600;
   color: #dd7c61;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
 }
+
+.chat-title-sub {
+  font-size: 9px;
+  font-weight: 400;
+  color: #aaa;
+  letter-spacing: 0.04em;
+}
+
+.location-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  opacity: 0.35;
+  padding: 4px;
+  line-height: 1;
+  transition: opacity 0.2s;
+}
+.location-btn:hover { opacity: 0.6; }
+.location-btn--active { opacity: 1; }
+.location-btn--denied { opacity: 0.2; cursor: not-allowed; }
 
 /* ── Message list ── */
 .message-list {
@@ -332,6 +357,22 @@
 @keyframes bounce {
   0%, 80%, 100% { transform: translateY(0); opacity: 0.5; }
   40%           { transform: translateY(-6px); opacity: 1; }
+}
+
+/* ── Tool-use spinner ── */
+.tool-spinner {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin-top: 8px;
+  border: 2px solid rgba(221, 124, 97, 0.3);
+  border-top-color: #dd7c61;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 /* ── Prompt suggestions ── */
