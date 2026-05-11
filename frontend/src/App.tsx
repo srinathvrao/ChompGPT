@@ -14,6 +14,9 @@ interface Session {
   id: string
   title?: string
   messages: Message[]
+  historyLoaded: boolean
+  hasMore: boolean
+  oldestTimestamp: string | null
 }
 
 const EMPTY_PROMPTS_NO_SESSIONS = [
@@ -33,16 +36,16 @@ const EMPTY_PROMPTS_WITH_SESSIONS = [
 ]
 
 const ALL_SUGGESTIONS = [
-  'BEST PIZZA WHERE',
-  'Cheap eats in Brooklyn',
+  'Pizza in park slope',
+  'Cheap eats in midtown',
   'Kevin\'s famous chili?',
-  'Open late night',
-  'Best sushi in town',
-  'I. need. caffeine.',
-  'Brunch this weekend',
-  'Family friendly restaurants',
+  'Vegan options near Rockefeller',
+  'Best sushi in upper west',
+  'Coffee near empire state',
+  'Brunch in williamsburg',
+  'Best spots in chinatown',
   'Hidden gem restaurants',
-  'Tacos!!!!',
+  'Tacos!!!',
   'Rooftop dining options',
   'Date night ideas',
   'Vegan options near me',
@@ -54,7 +57,7 @@ function readSessions(): Session[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     const stored: { id: string; title?: string }[] = raw ? JSON.parse(raw) : []
-    return stored.map(s => ({ id: s.id, title: s.title, messages: [] }))
+    return stored.map(s => ({ id: s.id, title: s.title, messages: [], historyLoaded: false, hasMore: false, oldestTimestamp: null }))
   } catch {
     return []
   }
@@ -81,8 +84,12 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [input, setInput] = useState('')
+  const [location, setLocation] = useState<{ lat: number; lon: number } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [toolInProgress, setToolInProgress] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const messageListRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const nextMsgId = useRef(0)
   const suggestions = useMemo(() =>
@@ -92,11 +99,20 @@ function App() {
   const activeSession = sessions.find(s => s.id === activeId) ?? null
 
   useEffect(() => {
+    navigator.geolocation?.getCurrentPosition(
+      ({ coords }) => setLocation({ lat: coords.latitude, lon: coords.longitude }),
+      () => {},
+    )
+  }, [])
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [activeSession?.messages])
 
   useEffect(() => {
-    inputRef.current?.focus()
+    if (!window.matchMedia('(pointer: coarse)').matches) {
+      inputRef.current?.focus()
+    }
   }, [activeId])
 
   useEffect(() => {
@@ -105,6 +121,76 @@ function App() {
     document.addEventListener('click', close)
     return () => document.removeEventListener('click', close)
   }, [menuOpenId])
+
+  useEffect(() => {
+    if (!activeId) return
+    const session = sessions.find(s => s.id === activeId)
+    if (!session || session.historyLoaded) return
+    fetchHistory(activeId)
+  }, [activeId])
+
+  async function fetchHistory(sessionId: string) {
+    setHistoryLoading(true)
+    try {
+      const res = await fetch(`/history?sessionId=${encodeURIComponent(sessionId)}`)
+      const data = await res.json()
+      setSessions(prev => prev.map(s => s.id === sessionId ? {
+        ...s,
+        messages: data.messages.map((m: { role: 'user' | 'assistant'; content: string; timestamp: string }) => ({
+          id: nextMsgId.current++,
+          role: m.role,
+          text: m.content,
+        })),
+        oldestTimestamp: data.messages[0]?.timestamp ?? null,
+        hasMore: data.hasMore,
+        historyLoaded: true,
+      } : s))
+    } catch {
+      setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, historyLoaded: true } : s))
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  async function loadMoreHistory() {
+    if (!activeId || !activeSession?.hasMore || historyLoading) return
+    const cursor = activeSession.oldestTimestamp
+    if (!cursor) return
+
+    const container = messageListRef.current
+    const prevScrollHeight = container?.scrollHeight ?? 0
+
+    setHistoryLoading(true)
+    try {
+      const res = await fetch(`/history?sessionId=${encodeURIComponent(activeId)}&before=${encodeURIComponent(cursor)}`)
+      const data = await res.json()
+      const prepended: Message[] = data.messages.map((m: { role: 'user' | 'assistant'; content: string; timestamp: string }) => ({
+        id: nextMsgId.current++,
+        role: m.role,
+        text: m.content,
+      }))
+      setSessions(prev => prev.map(s => s.id === activeId ? {
+        ...s,
+        messages: [...prepended, ...s.messages],
+        oldestTimestamp: data.messages[0]?.timestamp ?? s.oldestTimestamp,
+        hasMore: data.hasMore,
+      } : s))
+      // Restore scroll position so prepended messages don't jump the view
+      requestAnimationFrame(() => {
+        if (container) container.scrollTop = container.scrollHeight - prevScrollHeight
+      })
+    } catch {
+      // silently fail — user can scroll up again to retry
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  function handleMessageListScroll(e: React.UIEvent<HTMLDivElement>) {
+    if (e.currentTarget.scrollTop < 50 && activeSession?.hasMore && !historyLoading) {
+      loadMoreHistory()
+    }
+  }
 
   function patchMessages(sessionId: string, updater: (m: Message[]) => Message[]) {
     setSessions(prev =>
@@ -120,6 +206,7 @@ function App() {
     })
     if (activeId === id) setActiveId(null)
     setMenuOpenId(null)
+    fetch(`/session?sessionId=${encodeURIComponent(id)}`, { method: 'DELETE' })
   }
 
   function startNewChat() {
@@ -142,7 +229,7 @@ function App() {
     } else {
       sessionId = crypto.randomUUID()
       setSessions(prev => {
-        const next = [...prev, { id: sessionId, title, messages: [] }]
+        const next = [...prev, { id: sessionId, title, messages: [], historyLoaded: true, hasMore: false, oldestTimestamp: null }]
         persistSessions(next)
         return next
       })
@@ -160,7 +247,11 @@ function App() {
       const res = await api.fetch('', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: text, sessionId }),
+        body: JSON.stringify(
+          location
+            ? { prompt: text, sessionId, location }
+            : { prompt: text, sessionId }
+        ),
       })
 
       const reader = res.body!.getReader()
@@ -168,6 +259,7 @@ function App() {
       let buffer = ''
       let replyText = ''
       let replyId: number | null = null
+      let toolActive = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -181,8 +273,19 @@ function App() {
           if (!line.startsWith('data: ')) continue
           try {
             const parsed = JSON.parse(line.slice(6).trim())
+            if (parsed?.event?.messageStart && replyId !== null) {
+              replyText += '\n\n'
+            }
+            if (parsed?.event?.contentBlockStart?.start?.toolUse) {
+              toolActive = true
+              setToolInProgress(true)
+            }
             const text = parsed?.event?.contentBlockDelta?.delta?.text
             if (text) {
+              if (toolActive) {
+                toolActive = false
+                setToolInProgress(false)
+              }
               replyText += text
               if (replyId === null) {
                 replyId = nextMsgId.current++
@@ -216,7 +319,10 @@ function App() {
       ])
     } finally {
       setLoading(false)
-      inputRef.current?.focus()
+      setToolInProgress(false)
+      if (!window.matchMedia('(pointer: coarse)').matches) {
+        inputRef.current?.focus()
+      }
     }
   }
 
@@ -293,23 +399,33 @@ function App() {
               >
                 <span /><span /><span />
               </button>
-              <span className="chat-title">hungry.nyc 🗽</span>
+              <span className="chat-title">hungry.nyc 🗽<span className="chat-title-sub">more coming soon</span></span>
             </header>
 
-            <main className="message-list">
+            <main className="message-list" ref={messageListRef} onScroll={handleMessageListScroll}>
+              {historyLoading && (
+                <div className="bubble-row assistant">
+                  <div className="bubble assistant typing">
+                    <span /><span /><span />
+                  </div>
+                </div>
+              )}
               {!activeSession
                 ? <div className="empty-state">{emptyPrompt}</div>
                 : activeSession.messages.length === 0
                   ? <div className="empty-state">Send a message to get started</div>
-                  : activeSession.messages.map(msg => (
-                      <div key={msg.id} className={`bubble-row ${msg.role}`}>
-                        <div className={`bubble ${msg.role}`}>
-                          {msg.role === 'assistant'
-                            ? <ReactMarkdown>{msg.text}</ReactMarkdown>
-                            : msg.text}
+                  : activeSession.messages.map((msg, i) => {
+                      const isLast = i === activeSession.messages.length - 1
+                      return (
+                        <div key={msg.id} className={`bubble-row ${msg.role}`}>
+                          <div className={`bubble ${msg.role}`}>
+                            {msg.role === 'assistant'
+                              ? <><ReactMarkdown>{msg.text}</ReactMarkdown>{isLast && toolInProgress && <span className="tool-spinner" />}</>
+                              : msg.text}
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      )
+                    })
               }
               {loading && (
                 <div className="bubble-row assistant">

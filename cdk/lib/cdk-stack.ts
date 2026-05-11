@@ -5,7 +5,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as path from "path";
 import * as ecr_assets from "aws-cdk-lib/aws-ecr-assets";
-import { GEOCODER_SCHEMA, RESTAURANT_BY_LATLON_SCHEMA, RESTAURANT_BY_ADDRESS_SCHEMA } from "./mcp-schema";
+import { RESTAURANT_SCHEMA, GEOCODER_SCHEMA, RESTAURANT_BY_LATLON_SCHEMA, RESTAURANT_BY_ADDRESS_SCHEMA } from "./mcp-schema";
 
 const BEDROCK_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const BEDROCK_BASE_MODEL_ID = "anthropic.claude-haiku-4-5-20251001-v1:0";
@@ -41,6 +41,15 @@ export class CdkStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: "index.lambda_handler",
       code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/nyc_addr_finder")),
+      timeout: cdk.Duration.seconds(12),
+    });
+
+    // NYC restaurant finder lambda - address not required
+    const restaurantLambda = new lambda.Function(this, "NYCRestaurantLambda", {
+      functionName: "nyc-restaurant-finder",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: "index.lambda_handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/restaurant_finder")),
       timeout: cdk.Duration.seconds(12),
     });
 
@@ -81,6 +90,15 @@ export class CdkStack extends cdk.Stack {
       lambdaFunction: nycaddrLambda,
       toolSchema: agentcore.ToolSchema.fromInline(RESTAURANT_BY_ADDRESS_SCHEMA),
     });
+
+    agentcore_gw.addLambdaTarget('NYCRestaurantSearchTool', {
+      gatewayTargetName: "nyc-restaurant-search-tool",
+      description:
+        "Finds best-rated NYC restaurants for city-wide or borough-wide queries. Use when no neighborhood/landmark/address is specified - otherwise use the lat/lon finder.",
+      lambdaFunction: restaurantLambda,
+      toolSchema: agentcore.ToolSchema.fromInline(RESTAURANT_SCHEMA),
+    });
+    
   
     new cdk.CfnOutput(this, 'GatewayUrl', {
       value: agentcore_gw.gatewayUrl!,
@@ -100,6 +118,12 @@ export class CdkStack extends cdk.Stack {
     });
 
     nycaddrLambda.addPermission("AgentCoreGatewayInvokeNYCAddr", {
+      principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+      action: "lambda:InvokeFunction",
+      sourceArn: agentcore_gw.gatewayArn,
+    });
+
+    restaurantLambda.addPermission("AgentCoreGatewayInvokeNYCRest", {
       principal: new iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
       action: "lambda:InvokeFunction",
       sourceArn: agentcore_gw.gatewayArn,

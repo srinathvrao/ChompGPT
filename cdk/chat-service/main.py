@@ -75,6 +75,86 @@ async def save_message(dynamo_client, session_id: str, role: str, content: str):
 async def health():
     return {"status": "ok"}
 
+@app.get("/history")
+async def get_history(request: Request, sessionId: str, before: str = ""):
+    dynamo_client = request.app.state.dynamo_client
+
+    key_condition = "session_id = :sid"
+    expr_values: dict = {":sid": {"S": sessionId}}
+    expr_names: dict = {}
+
+    if before:
+        key_condition += " AND #ts < :cursor"
+        expr_values[":cursor"] = {"S": before}
+        expr_names["#ts"] = "timestamp"
+
+    query_kwargs: dict = dict(
+        TableName=TABLE_NAME,
+        KeyConditionExpression=key_condition,
+        ExpressionAttributeValues=expr_values,
+        ScanIndexForward=False,
+        Limit=10,
+    )
+    if expr_names:
+        query_kwargs["ExpressionAttributeNames"] = expr_names
+
+    resp = await dynamo_client.query(**query_kwargs)
+
+    items = resp.get("Items", [])
+    has_more = len(items) == 10
+    items.reverse()
+
+    return {
+        "messages": [
+            {
+                "role": item["role"]["S"],
+                "content": item["content"]["S"],
+                "timestamp": item["timestamp"]["S"],
+            }
+            for item in items
+        ],
+        "hasMore": has_more,
+    }
+
+@app.delete("/session")
+async def delete_session(request: Request, sessionId: str):
+    dynamo_client = request.app.state.dynamo_client
+
+    # Collect all keys for this session (may span multiple pages)
+    keys = []
+    last_key = None
+    while True:
+        kwargs: dict = dict(
+            TableName=TABLE_NAME,
+            KeyConditionExpression="session_id = :sid",
+            ExpressionAttributeValues={":sid": {"S": sessionId}},
+            ExpressionAttributeNames={"#ts": "timestamp"},
+            ProjectionExpression="session_id, #ts",
+        )
+        if last_key:
+            kwargs["ExclusiveStartKey"] = last_key
+        resp = await dynamo_client.query(**kwargs)
+        keys.extend(resp.get("Items", []))
+        last_key = resp.get("LastEvaluatedKey")
+        if not last_key:
+            break
+
+    # Batch delete in chunks of 25 (DynamoDB limit)
+    for i in range(0, len(keys), 25):
+        await dynamo_client.batch_write_item(
+            RequestItems={
+                TABLE_NAME: [
+                    {"DeleteRequest": {"Key": {
+                        "session_id": item["session_id"],
+                        "timestamp": item["timestamp"],
+                    }}}
+                    for item in keys[i:i + 25]
+                ]
+            }
+        )
+
+    return {"deleted": len(keys)}
+
 @app.post("/chat")
 async def invoke(request: Request):
     payload = await request.json()
