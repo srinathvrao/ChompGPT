@@ -1,5 +1,18 @@
 # A food chatbot..
 
+## Final build:
+
+[Old plan (cringe)](img/flow.png)
+
+New plan (based):
+
+![system.svg](img/system.svg)
+
+Use AWS AgentCore, and fargate containers in between because this is so much faster - always warm containers that can respond to new requests quickly.
+
+Nitpick: Supabase could get overwhelmed.. Probably needs some Redis caching.
+
+
 ## What I want:
 
 - Users can communicate with a chatbot
@@ -9,11 +22,6 @@
 ### Also:
 - Only restaurants in the US.
 - One-click CI/CD pipeline update my DB with newer restaurants (nice to have)
-
-## plan:
-
-![Plan.png](img/flow.png)
-
 
 ## Restaurant DB
 
