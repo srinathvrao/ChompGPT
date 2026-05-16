@@ -4,6 +4,8 @@ import type { ReactNode } from 'react'
 export interface AppConfig {
   region: string;
   albUrl: string;
+  cognitoPoolID: string;
+  accountID: string;
 }
 
 let cached: AppConfig | null = null;

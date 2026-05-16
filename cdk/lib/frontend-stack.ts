@@ -8,9 +8,11 @@ import * as path from "path";
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as targets from 'aws-cdk-lib/aws-route53-targets';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 
 interface FrontendStackProps extends cdk.StackProps {
   albDnsName: string;
+  cognitoIDPool: string;
 }
 
 export class FrontendStack extends cdk.Stack {
@@ -20,7 +22,7 @@ export class FrontendStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: FrontendStackProps) {
     super(scope, id, props);
 
-    const { albDnsName } = props;
+    const { albDnsName, cognitoIDPool } = props;
 
     const cert = acm.Certificate.fromCertificateArn(
       this,
@@ -47,6 +49,98 @@ export class FrontendStack extends cdk.Stack {
       `),
     });
 
+    const webAcl = new wafv2.CfnWebACL(this, 'ChatWAF', {
+      scope: 'CLOUDFRONT',
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: 'ChatWAF',
+        sampledRequestsEnabled: true,
+      },
+      rules: [
+        {
+          name: 'AWSManagedRulesAmazonIpReputationList',
+          priority: 0,
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'AWSManagedRulesAmazonIpReputationList',
+            sampledRequestsEnabled: true,
+          },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesAmazonIpReputationList',
+            },
+          },
+        },
+        {
+          name: 'ChatRateLimit',
+          priority: 1,
+          action: { block: {} },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'ChatRateLimit',
+            sampledRequestsEnabled: true,
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: 100,
+              evaluationWindowSec: 600, // max 100 requests/IP allowed to /chat in 10 minutes.
+              aggregateKeyType: 'IP',
+              scopeDownStatement: {
+                byteMatchStatement: {
+                  fieldToMatch: { uriPath: {} },
+                  positionalConstraint: 'STARTS_WITH',
+                  searchString: '/chat',
+                  textTransformations: [{ priority: 0, type: 'NONE' }],
+                },
+              },
+            },
+          },
+        },
+        {
+          name: 'SessionHistoryRateLimit',
+          priority: 2,
+          action: { block: {} },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'SessionHistoryRateLimit',
+            sampledRequestsEnabled: true,
+          },
+          statement: {
+            rateBasedStatement: {
+              limit: 200,
+              aggregateKeyType: 'IP',
+              evaluationWindowSec: 300, // max 200 requests/IP allowed to /session + /history in 5 minutes.
+              scopeDownStatement: {
+                orStatement: {
+                  statements: [
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'STARTS_WITH',
+                        searchString: '/session',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                    {
+                      byteMatchStatement: {
+                        fieldToMatch: { uriPath: {} },
+                        positionalConstraint: 'STARTS_WITH',
+                        searchString: '/history',
+                        textTransformations: [{ priority: 0, type: 'NONE' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        }
+      ],
+    });
+
     const bucket = new s3.Bucket(this, "restaurantApp", {
       bucketName: 'restaurantbucket-mcp-app',
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -61,15 +155,18 @@ export class FrontendStack extends cdk.Stack {
     });
 
     const distribution = new cloudfront.Distribution(this, "RestaurantDistribution", {
+      webAclId: webAcl.attrArn,
       defaultBehavior: {
         allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
         compress: true,
         origin: cloudfrontOrigins.S3BucketOrigin.withOriginAccessControl(bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        functionAssociations: [{
+        functionAssociations: [
+          {
           function: redirectFn,
           eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
-        }],
+          },
+        ],
       },
       additionalBehaviors: {
         '/chat': {
@@ -129,6 +226,8 @@ export class FrontendStack extends cdk.Stack {
         s3Deploy.Source.jsonData("config.json", {
           region: this.region,
           albUrl: `https://${distribution.distributionDomainName}/chat`,
+          cognitoPoolID: cognitoIDPool,
+          accountID: this.account,
         }),
       ],
       destinationBucket: bucket,

@@ -23,4 +23,5 @@ const chatCDKStack = new ChatServicesStack(app, 'RestaurantChatStack', {
 new FrontendStack(app, 'ChompFrontendStack', {
   env,
   albDnsName: chatCDKStack.albDnsName,
+  cognitoIDPool: chatCDKStack.cognitoIDPool,
 });

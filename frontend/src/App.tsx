@@ -161,13 +161,13 @@ function App() {
     if (!activeId) return
     const session = sessions.find(s => s.id === activeId)
     if (!session || session.historyLoaded) return
-    fetchHistory(activeId)
+    loadMessages(activeId)
   }, [activeId])
 
-  async function fetchHistory(sessionId: string) {
+  async function loadMessages(sessionId: string) {
     setHistoryLoading(true)
     try {
-      const res = await fetch(`/history?sessionId=${encodeURIComponent(sessionId)}`)
+      const res = await api.fetchHistory(sessionId)
       const data = await res.json()
       setSessions(prev => prev.map(s => s.id === sessionId ? {
         ...s,
@@ -234,7 +234,7 @@ function App() {
     })
     if (activeId === id) setActiveId(null)
     setMenuOpenId(null)
-    fetch(`/session?sessionId=${encodeURIComponent(id)}`, { method: 'DELETE' })
+    api.deleteSession(id)
   }
 
   function startNewChat() {
@@ -273,7 +273,7 @@ function App() {
     setLoading(true)
 
     try {
-      const res = await api.fetch('', {
+      const res = await api.fetch({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(

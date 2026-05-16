@@ -8,9 +8,8 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as logs from 'aws-cdk-lib/aws-logs';
-import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
-import * as appscaling from 'aws-cdk-lib/aws-applicationautoscaling';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 
 // cringe: api gateway -> lambda -> ...
 // based: api gateway -> load balancer VPC link ->  ECS Fargate containers -> ....
@@ -36,12 +35,44 @@ interface ChatStackProps extends cdk.StackProps {
 export class ChatServicesStack extends cdk.Stack {
 
   public readonly albDnsName: string;
+  public readonly cognitoIDPool: string;
 
   constructor(scope: Construct, id: string, props: ChatStackProps) {
     super(scope, id, props);
 
     const { agentCoreRuntime, chatHistoryTable } = props;
  
+    // Identity Pool for anonymous (guest) access
+    const identityPool = new cognito.CfnIdentityPool(this, 'HungryCityIdentityPool', {
+      allowUnauthenticatedIdentities: true,  // guest access
+      cognitoIdentityProviders: [],
+    });
+
+    const unauthRole = new iam.Role(this, 'UnauthRole', {
+      assumedBy: new iam.FederatedPrincipal(
+        'cognito-identity.amazonaws.com',
+        {
+          StringEquals: {
+            'cognito-identity.amazonaws.com:aud': identityPool.ref,
+          },
+          'ForAnyValue:StringLike': {
+            'cognito-identity.amazonaws.com:amr': 'unauthenticated',
+          },
+        },
+        'sts:AssumeRoleWithWebIdentity',
+      ),
+    });
+
+    new cognito.CfnIdentityPoolRoleAttachment(this, 'IdentityPoolRoles', {
+      identityPoolId: identityPool.ref,
+      roles: {
+        unauthenticated: unauthRole.roleArn,
+      },
+    });
+
+    // Export for frontend
+    this.cognitoIDPool = identityPool.ref;
+
     // set up virtual private cloud and a private namespace.
     const vpc = new ec2.Vpc(this, "RestaurantFargateVpc", {
       maxAzs: 2,
@@ -100,6 +131,7 @@ export class ChatServicesStack extends cdk.Stack {
         AWS_REGION: this.region,
         AGENTCORE_RUNTIME_ARN: agentCoreRuntime.agentRuntimeArn,
         CHAT_HISTORY_TABLE: chatHistoryTable.tableName,
+        IDENTITY_POOL_ID: this.cognitoIDPool,
       },
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: "restaurant-chat",
