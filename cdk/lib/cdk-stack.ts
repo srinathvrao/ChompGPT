@@ -146,7 +146,7 @@ export class CdkStack extends cdk.Stack {
       },
       lifecycleConfiguration: {
         idleRuntimeSessionTimeout: cdk.Duration.minutes(2),
-        maxLifetime: cdk.Duration.hours(8),
+        maxLifetime: cdk.Duration.minutes(15),
       }
     });
 
