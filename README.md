@@ -6,9 +6,12 @@
 
 New plan (based):
 
-![system.svg](img/system.svg)
+![system.png](img/system.png)
 
-Use AWS AgentCore, and fargate containers in between because this is so much faster - always warm containers that can respond to new requests quickly.
+Use AWS AgentCore, and fargate containers + ALB instead of lambdas.
+
+- lambda: pay for used execution time, cost goes crazy high. cold starting lambda is hella slow (provisioned concurrency helps, but cost problem still there).
+- Fargate: pay for one lightweight container that's constantly running, always warm container - super fast responses. Can enable Application auto-scaling based on traffic.
 
 Nitpick: Supabase could get overwhelmed.. Probably needs some Redis caching.
 
