@@ -2,3 +2,6 @@ fastapi
 uvicorn
 boto3
 aiobotocore
+PyJWT
+cryptography
+httpx

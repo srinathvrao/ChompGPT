@@ -1,6 +1,7 @@
 import csv
 import difflib
 import os
+import re
 
 CSV_PATH = os.path.join(os.path.dirname(__file__), "nyc-geocoding.csv")
 
@@ -29,18 +30,25 @@ def _lookup(query: str):
         if e["key"] == q:
             return e, "exact"
 
-    # 2. Substring - streets and landmarks only, ≥4 chars to avoid junk matches
+    # 2. Substring - all types, 5 chars to avoid junk matches
+    # Sort: entry-in-query first, then whole-word matches, then partial, then by key length
+    _qpat = re.compile(r'\b' + re.escape(q) + r'\b')
     hits = [
         e for e in _ENTRIES
-        if e["type"] != "neighbourhood" and len(e["key"]) >= 4
+        if len(e["key"]) >= 4
         and (q in e["key"] or e["key"] in q)
     ]
+    _TYPE_RANK = {"neighbourhood": 0, "street": 1, "landmark": 2}
     if hits:
-        hits.sort(key=lambda e: len(e["key"]))
+        hits.sort(key=lambda e: (
+            0 if e["key"] in q else (1 if _qpat.search(e["key"]) else 2),
+            _TYPE_RANK.get(e["type"], 3),
+            len(e["key"]),
+        ))
         return hits[0], "substring"
 
-    # 3. Fuzzy - streets and landmarks only
-    keys = [e["key"] for e in _ENTRIES if e["type"] != "neighbourhood" and len(e["key"]) >= 4]
+    # 3. Fuzzy - all types
+    keys = [e["key"] for e in _ENTRIES if len(e["key"]) >= 4]
     close = difflib.get_close_matches(q, keys, n=1, cutoff=0.6)
     if close:
         return next(e for e in _ENTRIES if e["key"] == close[0]), "fuzzy"
@@ -65,5 +73,5 @@ def lambda_handler(event, context):
     return {"error": f"Location not found: {query}"}
 
 if __name__ == "__main__":
-    req = {"query": "350 5th Ave"}
+    req = {"query": "Dumbo"}
     print(lambda_handler(req, None))

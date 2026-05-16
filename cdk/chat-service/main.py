@@ -8,6 +8,10 @@ import time
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from botocore.config import Config
+from starlette.middleware.base import BaseHTTPMiddleware
+import httpx
+import jwt as pyjwt
+from fastapi.responses import JSONResponse
 
 # This script is just a lightweight server that only forwards requests and streams responses.
 # from agentcore
@@ -20,6 +24,52 @@ bedrock_config = Config(
 )
 
 TABLE_NAME = os.environ["CHAT_HISTORY_TABLE"]
+_cognito_keys = None
+_cognito_keys_expiry = 0
+
+async def get_cognito_public_keys():
+    global _cognito_keys, _cognito_keys_expiry
+    if _cognito_keys is None or time.time() > _cognito_keys_expiry:
+        url = "https://cognito-identity.amazonaws.com/.well-known/jwks_uri"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url)
+            _cognito_keys = resp.json()
+            _cognito_keys_expiry = time.time() + 86400
+    return _cognito_keys
+
+class RequireAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in ("/health",) or request.method == "OPTIONS":
+            return await call_next(request)
+
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+
+        token = auth.split(" ")[1]
+        try:
+            keys = await get_cognito_public_keys()
+            # Get the kid from token header to find the right key
+            header = pyjwt.get_unverified_header(token)
+            kid = header.get("kid")
+            # Find matching key
+            key = next((k for k in keys["keys"] if k["kid"] == kid), None)
+            if not key:
+                raise ValueError("Key not found")
+
+            public_key = pyjwt.algorithms.RSAAlgorithm.from_jwk(key)
+            pyjwt.decode(
+                token,
+                public_key,
+                algorithms=["RS512"],
+                audience=os.environ["IDENTITY_POOL_ID"],
+            )
+        except Exception as e:
+            print(f"Auth failure: {e}")
+            return JSONResponse(status_code=403, content={"detail": "Invalid token"})
+
+        return await call_next(request)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,11 +90,12 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Amz-Security-Token"],
 )
+app.add_middleware(RequireAuthMiddleware)
 
-async def load_history(dynamo_client, session_id: str, limit: int = 20) -> list:
+async def load_history(dynamo_client, session_id: str, limit: int = 10) -> list:
     resp = await dynamo_client.query(
         TableName=TABLE_NAME,
         KeyConditionExpression="session_id = :sid",
@@ -59,17 +110,22 @@ async def load_history(dynamo_client, session_id: str, limit: int = 20) -> list:
         for item in items
     ]
 
-async def save_message(dynamo_client, session_id: str, role: str, content: str):
-    ts = f"{int(time.time() * 1000):016d}"
-    await dynamo_client.put_item(
-        TableName=TABLE_NAME,
-        Item={
-            "session_id": {"S": session_id},
-            "timestamp": {"S": ts},
-            "role": {"S": role},
-            "content": {"S": content},
-        },
-    )
+async def save_message(dynamo_client, session_id: str, role: str, content: str, ip: str = None):
+    now_s = int(time.time())
+    ts = f"{now_s * 1000:016d}"
+    expires_at = now_s + (30 * 24 * 60 * 60)
+
+    item = {
+        "session_id": {"S": session_id},
+        "timestamp": {"S": ts},
+        "role": {"S": role},
+        "content": {"S": content},
+        "expires_at": {"N": str(expires_at)},
+    }
+    if ip:
+        item["client_ip"] = {"S": ip}
+
+    await dynamo_client.put_item(TableName=TABLE_NAME, Item=item)
 
 @app.get("/health")
 async def health():
@@ -166,8 +222,10 @@ async def invoke(request: Request):
 
     history = await load_history(dynamo_client, session_id) if session_id else []
 
+    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else None)
+
     if session_id and user_text:
-        await save_message(dynamo_client, session_id, "user", user_text)
+        await save_message(dynamo_client, session_id, "user", user_text, ip=ip)
 
     enriched_payload = {**payload, "history": history}
 
