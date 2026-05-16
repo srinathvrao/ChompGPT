@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
 import './App.css'
 import { useConfig } from './config'
 import { createApiClient } from './aws'
@@ -53,6 +54,22 @@ const ALL_SUGGESTIONS = [
 
 const STORAGE_KEY = 'rf_sessions'
 
+function closeIncompleteLink(text: string): string {
+  // If the text ends with an unclosed [text](url, close it so ReactMarkdown can render it
+  return text.replace(/(\[[^\]]+\]\([^)]*?)$/, '$1)')
+}
+
+function hideBareUrls(text: string): string {
+  // Replace bare URLs (not already inside markdown link syntax) with a compact link
+  return text.replace(/(?<!\]\()https?:\/\/[^\s)>\]"]+/g, url => `[↗](${url})`)
+}
+
+const markdownComponents: Components = {
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+  ),
+}
+
 function readSessions(): Session[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -85,10 +102,13 @@ function App() {
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null)
   const [input, setInput] = useState('')
   const [location, setLocation] = useState<{ lat: number; lon: number } | null>(null)
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'granted' | 'denied' | 'dismissed'>('idle')
   const [loading, setLoading] = useState(false)
+  const [streaming, setStreaming] = useState(false)
   const [toolInProgress, setToolInProgress] = useState(false)
   const [historyLoading, setHistoryLoading] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollBehaviorRef = useRef<ScrollBehavior>('instant')
   const messageListRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const nextMsgId = useRef(0)
@@ -96,18 +116,33 @@ function App() {
     [...ALL_SUGGESTIONS].sort(() => Math.random() - 0.5).slice(0, 4),
   [])
 
-  const activeSession = sessions.find(s => s.id === activeId) ?? null
-
-  useEffect(() => {
-    navigator.geolocation?.getCurrentPosition(
-      ({ coords }) => setLocation({ lat: coords.latitude, lon: coords.longitude }),
-      () => {},
-    )
+  const inputPlaceholder = useMemo(() => {
+    const options = [
+      'hungry? let\'s find something good',
+      'craving anything specific?',
+      'i know a guy. a few thousand, actually',
+    ]
+    return options[Math.floor(Math.random() * options.length)]
   }, [])
 
+  const activeSession = sessions.find(s => s.id === activeId) ?? null
+
+  function requestLocation() {
+    if (locationStatus === 'denied') return
+    navigator.geolocation?.getCurrentPosition(
+      ({ coords }) => {
+        setLocation({ lat: coords.latitude, lon: coords.longitude })
+        setLocationStatus('granted')
+      },
+      () => setLocationStatus('denied'),
+    )
+  }
+
+  const lastMessageId = activeSession?.messages[activeSession.messages.length - 1]?.id
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [activeSession?.messages])
+    bottomRef.current?.scrollIntoView({ behavior: scrollBehaviorRef.current })
+    scrollBehaviorRef.current = 'instant'
+  }, [lastMessageId])
 
   useEffect(() => {
     if (!window.matchMedia('(pointer: coarse)').matches) {
@@ -157,9 +192,6 @@ function App() {
     const cursor = activeSession.oldestTimestamp
     if (!cursor) return
 
-    const container = messageListRef.current
-    const prevScrollHeight = container?.scrollHeight ?? 0
-
     setHistoryLoading(true)
     try {
       const res = await fetch(`/history?sessionId=${encodeURIComponent(activeId)}&before=${encodeURIComponent(cursor)}`)
@@ -175,10 +207,6 @@ function App() {
         oldestTimestamp: data.messages[0]?.timestamp ?? s.oldestTimestamp,
         hasMore: data.hasMore,
       } : s))
-      // Restore scroll position so prepended messages don't jump the view
-      requestAnimationFrame(() => {
-        if (container) container.scrollTop = container.scrollHeight - prevScrollHeight
-      })
     } catch {
       // silently fail — user can scroll up again to retry
     } finally {
@@ -236,6 +264,7 @@ function App() {
       setActiveId(sessionId)
     }
 
+    scrollBehaviorRef.current = 'smooth'
     patchMessages(sessionId, msgs => [
       ...msgs,
       { id: nextMsgId.current++, role: 'user', text },
@@ -290,6 +319,8 @@ function App() {
               if (replyId === null) {
                 replyId = nextMsgId.current++
                 setLoading(false)
+                setStreaming(true)
+                scrollBehaviorRef.current = 'smooth'
                 patchMessages(sessionId, msgs => [
                   ...msgs,
                   { id: replyId!, role: 'assistant', text: replyText },
@@ -319,6 +350,7 @@ function App() {
       ])
     } finally {
       setLoading(false)
+      setStreaming(false)
       setToolInProgress(false)
       if (!window.matchMedia('(pointer: coarse)').matches) {
         inputRef.current?.focus()
@@ -420,7 +452,7 @@ function App() {
                         <div key={msg.id} className={`bubble-row ${msg.role}`}>
                           <div className={`bubble ${msg.role}`}>
                             {msg.role === 'assistant'
-                              ? <><ReactMarkdown>{msg.text}</ReactMarkdown>{isLast && toolInProgress && <span className="tool-spinner" />}</>
+                              ? <div className={isLast && streaming ? 'streaming-md' : undefined}><ReactMarkdown components={markdownComponents}>{hideBareUrls(closeIncompleteLink(msg.text))}</ReactMarkdown>{isLast && streaming && <span className="stream-cursor" />}{isLast && toolInProgress && <span className="tool-spinner" />}</div>
                               : msg.text}
                           </div>
                         </div>
@@ -450,17 +482,29 @@ function App() {
               <div ref={bottomRef} />
             </main>
 
+            {locationStatus === 'idle' && (
+              <div className="location-banner">
+                <button className="location-share-btn" onClick={requestLocation}>Share my location</button>
+                <button className="location-dismiss-btn" aria-label="Dismiss" onClick={() => setLocationStatus('dismissed')}>✕</button>
+              </div>
+            )}
             <footer className="chat-footer">
-              <textarea
-                ref={inputRef}
-                className="chat-input"
-                rows={1}
-                placeholder="Type a message… (Enter to send, Shift+Enter for newline)"
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                disabled={loading}
-              />
+              <div className="chat-input-wrapper">
+                <textarea
+                  ref={inputRef}
+                  className="chat-input"
+                  rows={1}
+                  placeholder={inputPlaceholder}
+                  value={input}
+                  onChange={e => setInput(e.target.value.slice(0, 140))}
+                  onKeyDown={handleKeyDown}
+                  disabled={loading}
+                  maxLength={140}
+                />
+                <span className={`char-count${input.length >= 130 ? ' char-count--warn' : ''}`}>
+                  {input.length}/140
+                </span>
+              </div>
               <button
                 className="send-btn"
                 onClick={() => sendMessage()}
